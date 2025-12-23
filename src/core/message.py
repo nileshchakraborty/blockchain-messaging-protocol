@@ -24,6 +24,12 @@ class MessageType(Enum):
     TEXT = auto()
     ACK = auto()
     
+    # File transfer
+    FILE = auto()           # File transfer start with metadata
+    FILE_CHUNK = auto()     # File data chunk
+    FILE_COMPLETE = auto()  # File transfer completion
+    FILE_ERROR = auto()     # File transfer error
+    
     # Streaming (for future audio/video)
     STREAM_START = auto()
     STREAM_CHUNK = auto()

@@ -415,11 +415,94 @@ def history(ctx):
                 click.echo(f"  [{timestamp}] RECV: from {sender}")
             elif msg_type == "broadcast":
                 click.echo(f"  [{timestamp}] BROADCAST")
+            elif msg_type == "file_transfer":
+                filename = msg.get("filename", "unknown")
+                size = msg.get("size", 0)
+                click.echo(f"  [{timestamp}] FILE SENT: {filename} ({size} bytes)")
+            elif msg_type == "file_receive":
+                filename = msg.get("filename", "unknown")
+                size = msg.get("size", 0)
+                sender = msg.get("sender", "")[:16] + "..."
+                click.echo(f"  [{timestamp}] FILE RECV: {filename} ({size} bytes) from {sender}")
         
         click.echo()
     else:
         click.echo("No message history.")
 
 
+@cli.command("send-file")
+@click.argument("recipient")
+@click.argument("file_path", type=click.Path(exists=True))
+@click.option("--server", "-s", default="localhost:8765", help="Registry server address")
+@click.option("--port", "-p", default=8766, help="P2P port to use")
+@click.pass_context
+def send_file(ctx, recipient: str, file_path: str, server: str, port: int):
+    """Send a file to a peer."""
+    from ..engine.media import format_file_size
+    
+    config = ctx.obj["config"]
+    config.p2p_port = port
+    
+    # Parse server address
+    if ":" in server:
+        host, port_str = server.rsplit(":", 1)
+        config.registry_host = host
+        config.registry_port = int(port_str)
+    else:
+        config.registry_host = server
+    
+    client = Client(config)
+    
+    if not client.load_wallet():
+        click.echo(click.style("✗ No wallet found. Run 'bmp init' first.", fg="red"))
+        sys.exit(1)
+    
+    file_path = Path(file_path)
+    file_size = file_path.stat().st_size
+    
+    async def do_send():
+        # Register first to get peer list
+        if not await client.register():
+            return None
+        
+        # Start client
+        await client.start()
+        
+        # Find recipient
+        full_recipient = recipient
+        if len(recipient) < 64:
+            # Try to find by partial ID
+            for peer in client.get_peers():
+                if peer["peer_id"].startswith(recipient):
+                    full_recipient = peer["peer_id"]
+                    break
+        
+        # Send file
+        transfer_id = await client.send_file(full_recipient, file_path)
+        
+        await client.stop()
+        return transfer_id
+    
+    try:
+        click.echo(f"Sending file: {click.style(file_path.name, fg='yellow')}")
+        click.echo(f"Size: {format_file_size(file_size)}")
+        click.echo(f"To: {recipient[:16]}...")
+        click.echo()
+        
+        transfer_id = asyncio.run(do_send())
+        
+        if transfer_id:
+            click.echo(click.style("✓ File sent successfully!", fg="green"))
+            click.echo(f"  Transfer ID: {transfer_id[:16]}...")
+        else:
+            click.echo(click.style("✗ Failed to send file", fg="red"))
+            sys.exit(1)
+            
+    except Exception as e:
+        click.echo(click.style(f"✗ Error: {e}", fg="red"))
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     cli()
+

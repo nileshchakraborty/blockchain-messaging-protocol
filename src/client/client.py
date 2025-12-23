@@ -365,10 +365,38 @@ class Client:
         
         return await self._engine.send_text(recipient_id, message)
     
+    async def send_file(self, recipient_id: str, file_path: str) -> Optional[str]:
+        """
+        Send a file to a peer.
+        
+        Args:
+            recipient_id: Recipient's public key hex
+            file_path: Path to the file to send
+            
+        Returns:
+            Transfer ID if successful, None on error
+        """
+        if not self._engine:
+            raise RuntimeError("Client not started")
+        
+        # Check if connected, if not try to connect
+        peer = self._p2p_node.get_peer(recipient_id)
+        if not peer:
+            peer = await self.connect_to_peer(recipient_id)
+            if not peer:
+                return None
+        
+        return await self._engine.send_file(recipient_id, file_path)
+    
     def on_message(self, callback) -> None:
         """Register a message callback."""
         if self._engine:
             self._engine.on_message(callback)
+    
+    def on_file(self, callback) -> None:
+        """Register a file received callback."""
+        if self._engine:
+            self._engine.on_file(callback)
     
     def get_peers(self) -> list[dict]:
         """Get list of known peers from registry."""
@@ -379,3 +407,4 @@ class Client:
         if not self._p2p_node:
             return []
         return self._p2p_node.get_peers()
+

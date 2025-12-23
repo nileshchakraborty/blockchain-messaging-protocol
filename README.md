@@ -356,10 +356,33 @@ python -m src.client.cli --data-dir /tmp/alice listen --port 8766
 | `bmp init --name <name>` | Initialize a new wallet/identity |
 | `bmp register --server <host:port>` | Register with the registry server |
 | `bmp send [--port <port>] <recipient> <message>` | Send an encrypted message |
-| `bmp listen [--port <port>]` | Listen for incoming messages |
+| `bmp send-file [--port <port>] <recipient> <file>` | Send an encrypted file |
+| `bmp listen [--port <port>]` | Listen for incoming messages and files |
 | `bmp peers` | List known peers |
 | `bmp status` | Show connection status |
-| `bmp history` | Show message history from blockchain |
+| `bmp history` | Show message and file transfer history |
+
+### File Transfer
+
+Send files (images, documents, audio, video) with end-to-end encryption:
+
+```bash
+# Send a file to a peer
+bmp send-file --port 8768 <recipient-address> ./photo.jpg
+
+# Files are automatically:
+# - Validated (size limits, MIME type detection)
+# - Chunked for efficient transfer (256KB-1MB chunks)
+# - Encrypted with ChaCha20-Poly1305
+# - Hash-verified on receipt (SHA-256)
+# - Saved to ~/.bmp/downloads/
+```
+
+**Supported file types:**
+- **Images**: jpg, png, gif, webp (max 50MB)
+- **Audio**: mp3, wav, ogg, flac (max 200MB)
+- **Video**: mp4, webm, mov (max 2GB)
+- **Documents**: pdf, txt, doc, zip (max 100MB)
 
 ---
 
@@ -368,13 +391,14 @@ python -m src.client.cli --data-dir /tmp/alice listen --port 8766
 ### Test Suite
 
 ```bash
-# Run all tests
+# Run all tests (90 tests)
 pytest tests/ -v
 
 # Run specific test modules
 pytest tests/test_crypto.py -v      # Cryptographic primitives
 pytest tests/test_blockchain.py -v  # Blockchain operations
 pytest tests/test_integration.py -v # End-to-end scenarios
+pytest tests/test_media.py -v       # File transfer & media handling
 ```
 
 ### Security Considerations

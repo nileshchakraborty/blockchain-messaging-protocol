@@ -3,15 +3,18 @@ Transmission engine for the blockchain messaging protocol.
 
 This module provides:
 - TransmissionEngine: Unified interface for sending/receiving data
-- Support for text, with extensibility for audio/video
+- Support for text and file transfers
 - Automatic chunking for large payloads
 - Encryption and signing
+- Progress tracking for file transfers
 """
 
 import asyncio
 import logging
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
 
 from ..core.blockchain import Blockchain
@@ -32,6 +35,17 @@ from ..core.message import (
 from ..network.p2p import P2PNode
 from ..network.peer import Peer
 from .chunker import DataChunker, ChunkReassembler, Chunk, CHUNK_SIZE_TEXT
+from .media import (
+    MediaFile,
+    MediaInfo,
+    MediaType,
+    MediaTransfer,
+    TransferManager,
+    TransferStatus,
+    get_chunk_size,
+    MediaError,
+    HashVerificationError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +55,7 @@ class ContentType(Enum):
     
     TEXT = auto()
     BINARY = auto()
+    FILE = auto()
     # Future content types
     AUDIO = auto()
     VIDEO = auto()
@@ -63,18 +78,82 @@ class ReceivedMessage:
         return f"Message from {sender_short}{name}: {self.content[:50]}..."
 
 
-# Type alias for message callback
+@dataclass
+class ReceivedMedia:
+    """A received file/media."""
+    
+    id: str
+    sender: str
+    sender_name: Optional[str]
+    filename: str
+    mime_type: str
+    media_type: MediaType
+    size: int
+    data: bytes
+    file_hash: str
+    timestamp: float
+    verified: bool
+    saved_path: Optional[Path] = None
+    
+    def save(self, directory: Path, filename: Optional[str] = None) -> Path:
+        """
+        Save the received file to disk.
+        
+        Args:
+            directory: Directory to save to
+            filename: Optional filename override
+            
+        Returns:
+            Path to saved file
+        """
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        
+        save_name = filename or self.filename
+        save_path = directory / save_name
+        
+        # Avoid overwriting
+        if save_path.exists():
+            stem = save_path.stem
+            suffix = save_path.suffix
+            counter = 1
+            while save_path.exists():
+                save_path = directory / f"{stem}_{counter}{suffix}"
+                counter += 1
+        
+        with open(save_path, "wb") as f:
+            f.write(self.data)
+        
+        self.saved_path = save_path
+        logger.info(f"Saved file to {save_path}")
+        return save_path
+    
+    @property
+    def size_formatted(self) -> str:
+        """Get human-readable file size."""
+        from .media import format_file_size
+        return format_file_size(self.size)
+    
+    def __repr__(self) -> str:
+        sender_short = f"{self.sender[:8]}..." if len(self.sender) > 8 else self.sender
+        return f"ReceivedMedia({self.filename}, {self.size_formatted}, from {sender_short})"
+
+
+# Type aliases for callbacks
 MessageCallback = Callable[[ReceivedMessage], Coroutine[Any, Any, None]]
+FileCallback = Callable[[ReceivedMedia], Coroutine[Any, Any, None]]
 
 
 class TransmissionEngine:
     """
-    Main engine for transmitting and receiving messages.
+    Main engine for transmitting and receiving messages and files.
     
     Provides a high-level interface for:
-    - Sending encrypted messages
+    - Sending encrypted text messages
+    - Sending and receiving files (images, documents, audio, video)
     - Receiving and decrypting messages
     - Automatic chunking for large data
+    - Progress tracking for file transfers
     - Recording messages to blockchain
     """
     
@@ -82,7 +161,8 @@ class TransmissionEngine:
         self,
         wallet: Wallet,
         p2p_node: P2PNode,
-        blockchain: Optional[Blockchain] = None
+        blockchain: Optional[Blockchain] = None,
+        downloads_dir: Optional[Path] = None
     ) -> None:
         """
         Initialize transmission engine.
@@ -91,17 +171,30 @@ class TransmissionEngine:
             wallet: The user's identity wallet
             p2p_node: P2P networking node
             blockchain: Optional blockchain for message recording
+            downloads_dir: Directory for saving received files
         """
         self.wallet = wallet
         self.p2p_node = p2p_node
         self.blockchain = blockchain or Blockchain(difficulty=2)
+        self.downloads_dir = downloads_dir or Path.home() / ".bmp" / "downloads"
+        
+        # Ensure downloads directory exists
+        self.downloads_dir.mkdir(parents=True, exist_ok=True)
         
         # Chunking
         self.chunker = DataChunker(chunk_size=CHUNK_SIZE_TEXT)
         self.reassembler = ChunkReassembler()
         
+        # File transfer management
+        self.transfer_manager = TransferManager()
+        
         # Callbacks
         self._message_callbacks: list[MessageCallback] = []
+        self._file_callbacks: list[FileCallback] = []
+        
+        # Received files (in-memory for recent files)
+        self._received_files: list[ReceivedMedia] = []
+        self._max_received_files = 100  # Keep last 100 files in memory
         
         # Shared secrets cache (peer_id -> secret)
         self._shared_secrets: dict[str, bytes] = {}
@@ -112,6 +205,10 @@ class TransmissionEngine:
     def on_message(self, callback: MessageCallback) -> None:
         """Register a callback for received messages."""
         self._message_callbacks.append(callback)
+    
+    def on_file(self, callback: FileCallback) -> None:
+        """Register a callback for received files."""
+        self._file_callbacks.append(callback)
     
     def _get_shared_secret(self, peer: Peer) -> Optional[bytes]:
         """Get or derive shared secret with a peer."""
@@ -223,6 +320,196 @@ class TransmissionEngine:
         
         return await self.p2p_node.broadcast(message)
     
+    async def send_file(
+        self,
+        recipient_id: str,
+        file_path: str | Path,
+        encrypt: bool = True
+    ) -> Optional[str]:
+        """
+        Send a file to a peer.
+        
+        Args:
+            recipient_id: Recipient's peer ID (public key hex)
+            file_path: Path to the file to send
+            encrypt: Whether to encrypt the file content
+            
+        Returns:
+            Transfer ID if transfer started, None on error
+        """
+        peer = self.p2p_node.get_peer(recipient_id)
+        if not peer:
+            logger.error(f"Peer not found: {recipient_id[:16]}...")
+            return None
+        
+        try:
+            # Load file and validate
+            media_file = MediaFile.from_path(file_path)
+            logger.info(
+                f"Starting file transfer: {media_file.filename} "
+                f"({media_file.size_formatted}) to {peer}"
+            )
+            
+            # Create transfer
+            transfer_id = str(uuid.uuid4())
+            transfer = self.transfer_manager.create_send_transfer(
+                transfer_id=transfer_id,
+                media_file=media_file,
+                peer_id=recipient_id
+            )
+            
+            # Get shared secret for encryption
+            shared_secret = None
+            if encrypt and peer.encryption_key:
+                shared_secret = self._get_shared_secret(peer)
+            
+            # Send file metadata first
+            media_info = media_file.to_media_info()
+            metadata = {
+                "name": self.wallet.name,
+                "transfer_id": transfer_id,
+                "media_info": media_info.to_dict()
+            }
+            
+            # Create FILE message with metadata
+            file_msg = MessagePayload.create(
+                msg_type=MessageType.FILE,
+                sender=self.wallet.address,
+                recipient=recipient_id,
+                content=b"",  # No content in start message
+                signature=b"",
+                metadata=metadata
+            )
+            file_msg.signature = self.wallet.sign(file_msg.get_signable_content())
+            
+            # Record to blockchain
+            self.blockchain.add_data({
+                "type": "file_transfer",
+                "id": transfer_id,
+                "filename": media_info.filename,
+                "size": media_info.size,
+                "sender": self.wallet.address,
+                "recipient": recipient_id,
+                "timestamp": file_msg.timestamp
+            })
+            
+            # Send metadata message
+            if not await self.p2p_node.send_message(file_msg, recipient_id):
+                transfer.fail("Failed to send file metadata")
+                return None
+            
+            transfer.start()
+            
+            # Send file chunks
+            await self._send_file_chunks(
+                media_file=media_file,
+                transfer=transfer,
+                recipient_id=recipient_id,
+                shared_secret=shared_secret
+            )
+            
+            return transfer_id
+            
+        except MediaError as e:
+            logger.error(f"File transfer error: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error during file transfer: {e}")
+            return None
+    
+    async def _send_file_chunks(
+        self,
+        media_file: MediaFile,
+        transfer: MediaTransfer,
+        recipient_id: str,
+        shared_secret: Optional[bytes] = None
+    ) -> None:
+        """Send file data in chunks."""
+        chunk_size = get_chunk_size(media_file.media_type)
+        chunk_num = 0
+        total_chunks = transfer.media_info.chunk_count
+        
+        for chunk_data in media_file.read_chunks(chunk_size):
+            # Encrypt chunk if we have a shared secret
+            nonce = None
+            content = chunk_data
+            if shared_secret:
+                nonce, content = encrypt_message(chunk_data, shared_secret)
+            
+            # Create chunk info
+            chunk_info = ChunkInfo(
+                sequence=chunk_num,
+                total=total_chunks,
+                stream_id=transfer.id,
+                hash=""  # Will be calculated
+            )
+            
+            # Create FILE_CHUNK message
+            chunk_msg = MessagePayload.create(
+                msg_type=MessageType.FILE_CHUNK,
+                sender=self.wallet.address,
+                recipient=recipient_id,
+                content=content,
+                signature=b"",
+                nonce=nonce,
+                chunk_info=chunk_info,
+                metadata={"transfer_id": transfer.id}
+            )
+            chunk_msg.signature = self.wallet.sign(chunk_msg.get_signable_content())
+            
+            # Send chunk
+            if not await self.p2p_node.send_message(chunk_msg, recipient_id):
+                transfer.fail(f"Failed to send chunk {chunk_num}")
+                return
+            
+            transfer.chunks_completed = chunk_num + 1
+            transfer.bytes_transferred += len(chunk_data)
+            chunk_num += 1
+            
+            # Log progress periodically
+            if chunk_num % 10 == 0 or chunk_num == total_chunks:
+                logger.debug(
+                    f"Transfer {transfer.id[:8]}... progress: "
+                    f"{transfer.progress_percent}%"
+                )
+            
+            # Small delay to avoid overwhelming the receiver
+            await asyncio.sleep(0.01)
+        
+        # Send FILE_COMPLETE message
+        complete_msg = MessagePayload.create(
+            msg_type=MessageType.FILE_COMPLETE,
+            sender=self.wallet.address,
+            recipient=recipient_id,
+            content=b"",
+            signature=b"",
+            metadata={
+                "transfer_id": transfer.id,
+                "file_hash": media_file.file_hash
+            }
+        )
+        complete_msg.signature = self.wallet.sign(complete_msg.get_signable_content())
+        
+        await self.p2p_node.send_message(complete_msg, recipient_id)
+        transfer.complete()
+        
+        logger.info(
+            f"File transfer complete: {media_file.filename} "
+            f"({transfer.transfer_rate_formatted})"
+        )
+    
+    def get_received_files(self) -> list[ReceivedMedia]:
+        """Get list of recently received files."""
+        return self._received_files.copy()
+    
+    def get_transfer(self, transfer_id: str) -> Optional[MediaTransfer]:
+        """Get a transfer by ID."""
+        return self.transfer_manager.get_transfer(transfer_id)
+    
+    def get_active_transfers(self) -> list[MediaTransfer]:
+        """Get all active transfers."""
+        return self.transfer_manager.get_active_transfers()
+    
     async def _handle_incoming(
         self,
         message: MessagePayload,
@@ -248,6 +535,15 @@ class TransmissionEngine:
         
         elif message.type == MessageType.ACK:
             logger.debug(f"Received ACK from {peer}")
+        
+        elif message.type == MessageType.FILE:
+            await self._handle_file_start(message, peer, verified)
+        
+        elif message.type == MessageType.FILE_CHUNK:
+            await self._handle_file_chunk(message, peer)
+        
+        elif message.type == MessageType.FILE_COMPLETE:
+            await self._handle_file_complete(message, peer, verified)
         
         elif message.type in (
             MessageType.STREAM_START,
@@ -306,6 +602,164 @@ class TransmissionEngine:
                 await callback(received)
             except Exception as e:
                 logger.error(f"Message callback error: {e}")
+        
+        # Send ACK
+        ack = create_ack_message(
+            sender=self.wallet.address,
+            recipient=message.sender,
+            original_message_id=message.id,
+            sign_func=self.wallet.sign
+        )
+        await self.p2p_node.send_message(ack, peer.id)
+    
+    async def _handle_file_start(
+        self,
+        message: MessagePayload,
+        peer: Peer,
+        verified: bool
+    ) -> None:
+        """Handle incoming file transfer start message."""
+        transfer_id = message.metadata.get("transfer_id")
+        media_info_data = message.metadata.get("media_info")
+        
+        if not transfer_id or not media_info_data:
+            logger.error("Invalid FILE message: missing transfer_id or media_info")
+            return
+        
+        try:
+            media_info = MediaInfo.from_dict(media_info_data)
+        except (KeyError, ValueError) as e:
+            logger.error(f"Invalid media_info: {e}")
+            return
+        
+        # Create receive transfer
+        transfer = self.transfer_manager.create_receive_transfer(
+            transfer_id=transfer_id,
+            media_info=media_info,
+            peer_id=peer.id
+        )
+        transfer.start()
+        
+        logger.info(
+            f"Receiving file from {peer}: {media_info.filename} "
+            f"({media_info.size_formatted})"
+        )
+        
+        # Record to blockchain
+        self.blockchain.add_data({
+            "type": "file_receive",
+            "id": transfer_id,
+            "filename": media_info.filename,
+            "size": media_info.size,
+            "sender": message.sender,
+            "recipient": self.wallet.address,
+            "timestamp": message.timestamp
+        })
+    
+    async def _handle_file_chunk(
+        self,
+        message: MessagePayload,
+        peer: Peer
+    ) -> None:
+        """Handle incoming file chunk."""
+        transfer_id = message.metadata.get("transfer_id")
+        if not transfer_id:
+            logger.error("FILE_CHUNK missing transfer_id")
+            return
+        
+        transfer = self.transfer_manager.get_transfer(transfer_id)
+        if not transfer:
+            logger.warning(f"Unknown transfer: {transfer_id[:16]}...")
+            return
+        
+        # Decrypt if encrypted
+        content = message.content
+        if message.nonce and peer.encryption_key:
+            shared_secret = self._get_shared_secret(peer)
+            if shared_secret:
+                try:
+                    content = decrypt_message(content, shared_secret, message.nonce)
+                except Exception as e:
+                    logger.error(f"Failed to decrypt chunk: {e}")
+                    transfer.fail(f"Decryption failed: {e}")
+                    return
+        
+        # Add chunk to transfer
+        transfer.add_chunk(content)
+        
+        # Log progress periodically
+        if transfer.chunks_completed % 10 == 0:
+            logger.debug(
+                f"Receiving {transfer.media_info.filename}: "
+                f"{transfer.progress_percent}%"
+            )
+    
+    async def _handle_file_complete(
+        self,
+        message: MessagePayload,
+        peer: Peer,
+        verified: bool
+    ) -> None:
+        """Handle file transfer completion."""
+        transfer_id = message.metadata.get("transfer_id")
+        expected_hash = message.metadata.get("file_hash")
+        
+        if not transfer_id:
+            logger.error("FILE_COMPLETE missing transfer_id")
+            return
+        
+        transfer = self.transfer_manager.get_transfer(transfer_id)
+        if not transfer:
+            logger.warning(f"Unknown transfer: {transfer_id[:16]}...")
+            return
+        
+        # Verify hash
+        if not transfer.verify_hash():
+            logger.error(
+                f"File hash verification failed for {transfer.media_info.filename}"
+            )
+            transfer.fail("Hash verification failed")
+            return
+        
+        transfer.complete()
+        
+        # Create ReceivedMedia
+        received = ReceivedMedia(
+            id=transfer_id,
+            sender=message.sender,
+            sender_name=message.metadata.get("name"),
+            filename=transfer.media_info.filename,
+            mime_type=transfer.media_info.mime_type,
+            media_type=transfer.media_info.media_type,
+            size=transfer.media_info.size,
+            data=transfer.data,
+            file_hash=transfer.media_info.file_hash,
+            timestamp=message.timestamp,
+            verified=verified
+        )
+        
+        # Auto-save to downloads directory
+        try:
+            received.save(self.downloads_dir)
+        except Exception as e:
+            logger.error(f"Failed to save file: {e}")
+        
+        # Add to received files list
+        self._received_files.append(received)
+        if len(self._received_files) > self._max_received_files:
+            self._received_files.pop(0)
+        
+        logger.info(
+            f"File received: {received.filename} ({received.size_formatted}) "
+            f"from {peer}"
+        )
+        
+        # Notify callbacks
+        for callback in self._file_callbacks:
+            try:
+                await callback(received)
+            except Exception as e:
+                logger.error(f"File callback error: {e}")
         
         # Send ACK
         ack = create_ack_message(
