@@ -24,6 +24,7 @@ The architecture is designed with extensibility in mind, supporting future integ
 - [Installation](#installation)
 - [Usage](#usage)
 - [Evaluation](#evaluation)
+- [Documentation](#documentation)
 - [Future Work](#future-work)
 - [References](#references)
 
@@ -438,6 +439,48 @@ pytest tests/test_p2p.py -v                  # Peer-to-peer networking
 | Impersonation | Ed25519 digital signatures |
 | Message Tampering | Poly1305 MAC + blockchain immutability |
 | Metadata Analysis | Future: onion routing integration |
+
+### Performance Benchmarks
+
+Measured on Apple Silicon (December 2024):
+
+| Operation | Avg Time | Ops/sec |
+|-----------|----------|---------|
+| **Cryptography** | | |
+| Sign (1.4KB) | 0.13ms | 7,917 |
+| Verify (1.4KB) | 0.27ms | 3,733 |
+| Encrypt (1.4KB) | 0.003ms | 311,709 |
+| Decrypt (1.4KB) | 0.005ms | 195,595 |
+| **Blockchain** | | |
+| Block Lookup (hash) | <0.001ms | 9,259,028 |
+| Mine (difficulty=2) | 1.8ms | 546 |
+| Save to Disk | 0.29ms | 3,447 |
+| **Chunking** | | |
+| Chunk 1MB | 0.35ms | 2,898 |
+| Reassemble 64KB | 0.10ms | 9,776 |
+
+```bash
+# Run benchmarks
+python -m benchmarks.run_benchmarks
+```
+
+---
+
+## Documentation
+
+📚 **Full documentation available in the [Wiki](docs/wiki/)**:
+
+| Guide | Description |
+|-------|-------------|
+| [🏠 Home](docs/wiki/Home.md) | Overview and quick links |
+| [🚀 Getting Started](docs/wiki/Getting-Started.md) | Installation and first steps |
+| [🏗️ Architecture](docs/wiki/Architecture.md) | System design and data flows |
+| [🔐 Cryptography](docs/wiki/Cryptography.md) | Security model and primitives |
+| [⛓️ Blockchain](docs/wiki/Blockchain.md) | Chain design and sync protocol |
+| [📁 File Transfer](docs/wiki/File-Transfer.md) | Media exchange protocol |
+| [📊 Benchmarks](docs/wiki/Benchmarks.md) | Performance metrics |
+| [📖 API Reference](docs/wiki/API-Reference.md) | Complete API documentation |
+| [🧪 Testing](docs/wiki/Testing.md) | Test suite and coverage |
 
 ---
 
