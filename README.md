@@ -326,12 +326,27 @@ bmp-server --port 8765
 # Terminal 1: Client A (Alice)
 bmp init --name "Alice"
 bmp register --server localhost:8765
-bmp listen
+bmp listen --port 8766
 
 # Terminal 2: Client B (Bob)
 bmp init --name "Bob"
 bmp register --server localhost:8765
-bmp send <alice-public-key> "Hello Alice!"
+bmp send --port 8767 <alice-public-key> "Hello Alice!"
+```
+
+> **Note**: When running multiple clients on the same machine, use different `--port` values to avoid conflicts.
+
+### Development Mode
+
+When developing, you can run commands directly via Python modules:
+
+```bash
+# Server
+python -m src.server.server --port 8765 --debug
+
+# Client (use --data-dir for separate client identities)
+python -m src.client.cli --data-dir /tmp/alice init --name "Alice"
+python -m src.client.cli --data-dir /tmp/alice listen --port 8766
 ```
 
 ### CLI Commands
@@ -340,8 +355,8 @@ bmp send <alice-public-key> "Hello Alice!"
 |---------|-------------|
 | `bmp init --name <name>` | Initialize a new wallet/identity |
 | `bmp register --server <host:port>` | Register with the registry server |
-| `bmp send <recipient> <message>` | Send an encrypted message |
-| `bmp listen` | Listen for incoming messages |
+| `bmp send [--port <port>] <recipient> <message>` | Send an encrypted message |
+| `bmp listen [--port <port>]` | Listen for incoming messages |
 | `bmp peers` | List known peers |
 | `bmp status` | Show connection status |
 | `bmp history` | Show message history from blockchain |

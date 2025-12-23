@@ -164,16 +164,18 @@ def register(ctx, server: str):
 @click.argument("recipient")
 @click.argument("message")
 @click.option("--server", "-s", default="localhost:8765", help="Registry server address")
+@click.option("--port", "-p", default=8766, help="P2P port to use")
 @click.pass_context
-def send(ctx, recipient: str, message: str, server: str):
+def send(ctx, recipient: str, message: str, server: str, port: int):
     """Send a message to a peer."""
     config = ctx.obj["config"]
+    config.p2p_port = port
     
     # Parse server address
     if ":" in server:
-        host, port = server.rsplit(":", 1)
+        host, port_str = server.rsplit(":", 1)
         config.registry_host = host
-        config.registry_port = int(port)
+        config.registry_port = int(port_str)
     else:
         config.registry_host = server
     
