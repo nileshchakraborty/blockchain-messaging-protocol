@@ -281,14 +281,39 @@ The architecture is designed with media streaming extensibility:
 3. **Codec Registry**: Pluggable encoder/decoder system in TransmissionEngine
 4. **QoS Layer**: Priority queuing can be added to P2P module
 
+
 ### Blockchain Scalability
 
 For high-throughput messaging scenarios, the blockchain design incorporates:
 
-- **Merkle Tree Batching**: Multiple messages per block [6]
+- **Merkle Tree Batching**: Multiple messages per block with Merkle root [6]
 - **Lightweight Consensus**: Reduced PoW difficulty (configurable)
 - **Local Chain**: Each node maintains message history locally (no global consensus required)
-- **Pruning**: Historical blocks can be archived (future work)
+- **Pruning**: Historical blocks can be archived
+
+### Production Blockchain Features
+
+| Feature | Description |
+|---------|-------------|
+| **Atomic Persistence** | Write-to-temp + atomic rename prevents corruption |
+| **Block Size Limits** | 1MB max block, 100KB max item, 10K mempool cap |
+| **O(1) Indexing** | Fast lookup by hash, height, or message ID |
+| **Chain Sync** | Longest-chain rule with total work comparison |
+| **Merkle Proofs** | Compact proofs that message exists in chain |
+| **Connection Pooling** | WebSocket reuse with health checks |
+
+```mermaid
+sequenceDiagram
+    participant A as Node A
+    participant B as Node B
+    
+    A->>B: CHAIN_STATUS (height=10, work=1024)
+    B->>B: Compare: my height=5, work=512
+    B->>A: CHAIN_REQUEST (start=6, end=10)
+    A->>B: CHAIN_RESPONSE (blocks 6-10)
+    B->>B: Validate chain
+    B->>B: Replace chain if valid
+```
 
 ---
 
@@ -391,14 +416,17 @@ bmp send-file --port 8768 <recipient-address> ./photo.jpg
 ### Test Suite
 
 ```bash
-# Run all tests (90 tests)
+# Run all tests (122 tests)
 pytest tests/ -v
 
 # Run specific test modules
-pytest tests/test_crypto.py -v      # Cryptographic primitives
-pytest tests/test_blockchain.py -v  # Blockchain operations
-pytest tests/test_integration.py -v # End-to-end scenarios
-pytest tests/test_media.py -v       # File transfer & media handling
+pytest tests/test_crypto.py -v               # Cryptographic primitives
+pytest tests/test_blockchain.py -v           # Basic blockchain operations
+pytest tests/test_blockchain_production.py -v # Production features (sync, proofs)
+pytest tests/test_integration.py -v          # End-to-end scenarios
+pytest tests/test_media.py -v                # File transfer & media handling
+pytest tests/test_message.py -v              # Message protocol
+pytest tests/test_p2p.py -v                  # Peer-to-peer networking
 ```
 
 ### Security Considerations

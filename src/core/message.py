@@ -46,6 +46,13 @@ class MessageType(Enum):
     REGISTER = auto()
     REGISTER_ACK = auto()
     PEER_LIST = auto()
+    
+    # Chain synchronization
+    CHAIN_STATUS = auto()      # Share/request chain status
+    CHAIN_REQUEST = auto()     # Request specific blocks
+    CHAIN_RESPONSE = auto()    # Send blocks in response
+    CHAIN_SYNC_START = auto()  # Begin sync process
+    CHAIN_SYNC_END = auto()    # End sync process
 
 
 @dataclass
